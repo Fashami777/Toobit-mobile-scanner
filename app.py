@@ -54,7 +54,15 @@ with st.sidebar:
     min_score = st.slider("حداقل امتیاز نمایش", 0, 100, 50, 5)
     st.info("برای شروع، تنظیمات پیش‌فرض را نگه دار. درخواست‌های API با مکث و محدودیت انجام می‌شوند.")
 
-st_autorefresh(interval=refresh_sec * 1000, key="scanner_refresh")
+# Auto-refresh counter: Streamlit reruns the script at the selected interval.
+refresh_count = st_autorefresh(interval=refresh_sec * 1000, key="scanner_refresh_v2", limit=None)
+
+# Manual refresh is useful for diagnosing whether reruns are working.
+with st.sidebar:
+    st.caption(f"چرخه اجرا: {refresh_count}")
+    if st.button("اسکن مجدد همین حالا", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
 
 session = requests.Session()
 session.headers.update({"User-Agent": "ToobitResearchScanner/1.0"})
@@ -191,7 +199,7 @@ def get_book_ratio(symbol):
     except Exception: return np.nan
 
 @st.cache_data(ttl=240, show_spinner=False)
-def fetch_market():
+def fetch_market(min_quote_volume, top_universe):
     info = get("/api/v1/exchangeInfo")
     contracts = [c for c in info.get("contracts", []) if c.get("status") == "TRADING"
                  and c.get("inverse") is False and c.get("symbol","").endswith("-SWAP-USDT")]
@@ -252,13 +260,14 @@ def safe_signal(score):
 
 try:
     with st.spinner("دریافت فهرست قراردادها و داده‌های بازار از Toobit..."):
-        universe = fetch_market()
+        universe = fetch_market(min_quote_volume, top_universe)
     if not universe:
         st.warning("در حال حاضر داده‌ای دریافت نشد. اتصال اینترنت، دسترسی منطقه‌ای و API را بررسی کن.")
         st.stop()
 
     state = load_state()
     rows = []
+    scan_errors = []
     progress = st.progress(0)
     status = st.empty()
     # Analyze candles for liquid universe; expensive OI/depth only for the highest-volume subset.
@@ -292,7 +301,8 @@ try:
                 "Short SL*": a["support"]+1.2*atr, "Short TP1*": a["support"]-1.5*atr,
                 "Signal candle UTC": datetime.fromtimestamp(a["candle_time"]/1000, timezone.utc).strftime("%H:%M")
             })
-        except Exception:
+        except Exception as e:
+            scan_errors.append(f"{sym}: {type(e).__name__}: {e}")
             continue
         progress.progress((i+1)/len(universe))
     save_state(state)
@@ -302,7 +312,11 @@ try:
         st.error("کندل قابل تحلیل دریافت نشد. احتمالاً قالب پاسخ API تغییر کرده یا دسترسی API محدود است.")
         st.stop()
     df = pd.DataFrame(rows)
-    st.caption(f"آخرین بررسی: {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')} | ارزهای بررسی‌شده: {len(df)} | به‌روزرسانی بعدی: {refresh_sec//60} دقیقه")
+    now_utc = datetime.now(timezone.utc)
+    st.caption(f"آخرین بررسی موفق: {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')} | چرخه اجرا: {refresh_count} | ارزهای بررسی‌شده: {len(df)} | فاصله اسکن: {refresh_sec//60} دقیقه")
+    if scan_errors:
+        with st.expander(f"خطاهای دریافت داده ({len(scan_errors)})"):
+            st.code("\n".join(scan_errors[:30]))
     c1,c2,c3,c4 = st.columns(4)
     c1.metric("ارزهای تحلیل‌شده", len(df))
     c2.metric("نامزدهای LONG ≥ 70", int((df.Long>=70).sum()))
@@ -336,4 +350,5 @@ except requests.RequestException as e:
     st.error(f"خطای اتصال به API: {e}")
     st.info("اگر API از شبکه شما در دسترس نیست، با VPN یا شبکه دیگری امتحان کن. آدرس پایه API در ابتدای app.py قابل تغییر است.")
 except Exception as e:
+    st.error(f"خطای اجرای اسکنر: {type(e).__name__}: {e}")
     st.exception(e)
